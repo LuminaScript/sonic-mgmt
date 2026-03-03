@@ -68,13 +68,13 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if add_info:
         write("   - Pre-existing routes (baseline_route_count): {}".format(
             add_info["baseline_route_count"]))
-        write("   - Route addition (ip -batch) duration : {:.2f} seconds".format(
+        write("   - Route addition (ip -batch) duration       : {:.2f} seconds".format(
             add_info["add_duration"]))
-        write("   - Time for routes to appear in CLI     : {:.2f} seconds".format(
+        write("   - Time for routes to appear in CLI          : {:.2f} seconds".format(
             add_info["convergence_time"]))
-        write("   - 'show ip route' execution time       : {:.2f} seconds".format(
+        write("   - 'show ip route' execution time            : {:.2f} seconds".format(
             add_info["show_duration"]))
-        write("   - Routes found in 'show ip route'      : {} (baseline_route_count {} + added {})".format(
+        write("   - Routes found in 'show ip route'           : {} (baseline_route_count {} + added {})".format(
             add_info["route_count"], add_info["baseline_route_count"],
             add_info["route_count"] - add_info["baseline_route_count"]))
     else:
