@@ -84,7 +84,7 @@ def test_add_40k_static_routes(duthost, nexthop_ip, loganalyzer,
         "convergence_time": convergence_time,
         "show_duration": show_duration,
         "route_count": final_count,
-        "baseline": baseline_route_count,
+        "baseline_route_count": baseline_route_count,
     }
 
 
@@ -135,5 +135,5 @@ def test_remove_40k_static_routes(duthost, nexthop_ip, loganalyzer,
         "convergence_time": convergence_time,
         "show_duration": show_duration,
         "remaining_routes": final_count,
-        "baseline": baseline_route_count,
+        "baseline_route_count": baseline_route_count,
     }

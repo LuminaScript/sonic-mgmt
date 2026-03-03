@@ -66,17 +66,17 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     write("   (Note: If routes are configured by directly writing redis db,")
     write("   they will not be displayed by 'show ip route' CLI command.)")
     if add_info:
-        write("   - Pre-existing routes (baseline)       : {}".format(
-            add_info["baseline"]))
+        write("   - Pre-existing routes (baseline_route_count): {}".format(
+            add_info["baseline_route_count"]))
         write("   - Route addition (ip -batch) duration : {:.2f} seconds".format(
             add_info["add_duration"]))
         write("   - Time for routes to appear in CLI     : {:.2f} seconds".format(
             add_info["convergence_time"]))
         write("   - 'show ip route' execution time       : {:.2f} seconds".format(
             add_info["show_duration"]))
-        write("   - Routes found in 'show ip route'      : {} (baseline {} + added {})".format(
-            add_info["route_count"], add_info["baseline"],
-            add_info["route_count"] - add_info["baseline"]))
+        write("   - Routes found in 'show ip route'      : {} (baseline_route_count {} + added {})".format(
+            add_info["route_count"], add_info["baseline_route_count"],
+            add_info["route_count"] - add_info["baseline_route_count"]))
     else:
         write("   - SKIPPED (test_add_40k_static_routes did not run)")
 
@@ -104,8 +104,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             remove_info["convergence_time"]))
         write("   - 'show ip route' execution time       : {:.2f} seconds".format(
             remove_info["show_duration"]))
-        write("   - Routes remaining in 'show ip route'  : {} (baseline was {})".format(
-            remove_info["remaining_routes"], remove_info["baseline"]))
+        write("   - Routes remaining in 'show ip route'  : {} (baseline_route_count was {})".format(
+            remove_info["remaining_routes"], remove_info["baseline_route_count"]))
     else:
         write("   - SKIPPED (test_remove_40k_static_routes did not run)")
 
