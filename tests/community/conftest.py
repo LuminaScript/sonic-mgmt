@@ -1,11 +1,28 @@
 import pytest
 import logging
 
-from tests.community.route_helpers import NUM_ROUTES, ROUTE_PREFIX, apply_routes
+from tests.community.route_helpers import (
+    NUM_ROUTES,
+    ROUTE_PREFIX,
+    apply_routes,
+    remove_routes_config_db,
+)
 
 logger = logging.getLogger(__name__)
 
 _summary_data = {}
+
+
+def pytest_addoption(parser):
+    """Add option for 40K route stress test method."""
+    parser.addoption(
+        "--route-stress-method",
+        action="store",
+        default="config_db",
+        choices=("config_db", "ip_batch"),
+        help="How to add/remove 40K static routes: 'config_db' (persistent, config load + redis DEL) "
+             "or 'ip_batch' (non-persistent, ip -batch). Default: config_db.",
+    )
 
 
 @pytest.fixture(scope="module")
@@ -37,13 +54,25 @@ def test_summary():
     return _summary_data
 
 
+@pytest.fixture(scope="module")
+def route_stress_method(request):
+    """'config_db' or 'ip_batch' from --route-stress-method."""
+    return request.config.getoption("--route-stress-method", "config_db")
+
+
 @pytest.fixture(scope="module", autouse=True)
-def manage_routes_cleanup(duthost, nexthop_ip):
+def manage_routes_cleanup(duthost, request, nexthop_ip):
     """Remove all test routes and temp files after the module finishes."""
     yield
-    logger.info("Cleanup: removing test routes")
-    apply_routes(duthost, "del", NUM_ROUTES, nexthop_ip)
-    duthost.shell("rm -f /tmp/routes_*.txt", module_ignore_errors=True)
+    method = request.config.getoption("--route-stress-method", "config_db")
+    logger.info("Cleanup: removing test routes (method=%s)", method)
+    if method == "config_db":
+        remove_routes_config_db(duthost, NUM_ROUTES)
+        duthost.shell("rm -f /tmp/static_routes_40k.json /tmp/static_route_keys_40k.txt",
+                      module_ignore_errors=True)
+    else:
+        apply_routes(duthost, "del", NUM_ROUTES, nexthop_ip)
+        duthost.shell("rm -f /tmp/routes_*.txt", module_ignore_errors=True)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -60,18 +89,23 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     write(sep)
 
     add_info = _summary_data.get("add", {})
+    route_method = add_info.get("route_method", "config_db")
     write("")
-    write("1. Configure 40K static routes and verify how much time it takes")
-    write("   for them to be shown in the CLI show commands.")
-    write("   (Note: If routes are configured by directly writing redis db,")
-    write("   they will not be displayed by 'show ip route' CLI command.)")
+    write("1. Configure 40K static routes and verify how much time it takes for them to be")
+    write("   shown in the CLI show commands. Method: {}.".format(route_method))
     if add_info:
         write("   - Pre-existing routes (baseline_route_count): {}".format(
             add_info["baseline_route_count"]))
-        write("   - Route addition (ip -batch) duration       : {:.2f} seconds".format(
-            add_info["add_duration"]))
-        write("   - Time for routes to appear in CLI          : {:.2f} seconds".format(
-            add_info["convergence_time"]))
+        if route_method == "config_db":
+            write("   - Config load duration (write to config DB)   : {:.2f} seconds".format(
+                add_info["add_duration"]))
+            write("   - FIB convergence (routes appear in CLI)     : {:.2f} seconds".format(
+                add_info["convergence_time"]))
+        else:
+            write("   - Route addition (ip -batch) duration       : {:.2f} seconds".format(
+                add_info["add_duration"]))
+            write("   - Time for routes to appear in CLI          : {:.2f} seconds".format(
+                add_info["convergence_time"]))
         write("   - 'show ip route' execution time            : {:.2f} seconds".format(
             add_info["show_duration"]))
         write("   - Routes found in 'show ip route'           : {} (baseline_route_count {} + added {})".format(
@@ -94,14 +128,21 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         write("   - SKIPPED (test_verify_cpu_and_memory did not run)")
 
     remove_info = _summary_data.get("remove", {})
+    remove_method = remove_info.get("route_method", "config_db") if remove_info else "config_db"
     write("")
-    write("3. Remove 40K static routes and verify how much time it takes")
-    write("   for them to be not shown in the CLI show commands:")
+    write("3. Remove 40K static routes and verify how much time it takes for them to be")
+    write("   not shown in the CLI show commands. Method: {}.".format(remove_method))
     if remove_info:
-        write("   - Route removal (ip -batch) duration   : {:.2f} seconds".format(
-            remove_info["del_duration"]))
-        write("   - Time for routes to disappear from CLI: {:.2f} seconds".format(
-            remove_info["convergence_time"]))
+        if remove_method == "config_db":
+            write("   - Config DB removal duration                : {:.2f} seconds".format(
+                remove_info["del_duration"]))
+            write("   - FIB convergence (routes disappear from CLI): {:.2f} seconds".format(
+                remove_info["convergence_time"]))
+        else:
+            write("   - Route removal (ip -batch) duration   : {:.2f} seconds".format(
+                remove_info["del_duration"]))
+            write("   - Time for routes to disappear from CLI: {:.2f} seconds".format(
+                remove_info["convergence_time"]))
         write("   - 'show ip route' execution time       : {:.2f} seconds".format(
             remove_info["show_duration"]))
         write("   - Routes remaining in 'show ip route'  : {} (baseline_route_count was {})".format(

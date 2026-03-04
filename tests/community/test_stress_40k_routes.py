@@ -2,21 +2,32 @@
 Test: 40K static routes stress test.
 
 Three steps:
-  1. Add 40K routes with 'ip route add', measure time for 'show ip route'
-     to reflect them.
+  1. Add 40K routes (method: config_db or ip_batch), measure time for
+     'show ip route' to reflect them.
   2. Check CPU and memory with 'top'.
-  3. Remove 40K routes with 'ip route del', measure time for 'show ip route'
+  3. Remove 40K routes (same method), measure time for 'show ip route'
      to reflect removal.
 
-Routes are added via 'ip route add' (not redis DB) so they appear in
-'show ip route'.  The loganalyzer fixture validates syslog automatically.
+Methods (--route-stress-method):
+  - config_db: config load -y STATIC_ROUTE + redis DEL. Persistent; FIB
+    convergence can take minutes.
+  - ip_batch: ip route add/del via ip -batch. Non-persistent; convergence
+    is typically fast.
+
+The loganalyzer fixture validates syslog automatically.
 """
 
 import time
 import logging
 
 import pytest
-from tests.community.route_helpers import NUM_ROUTES, ROUTE_PREFIX, apply_routes
+from tests.community.route_helpers import (
+    NUM_ROUTES,
+    ROUTE_PREFIX,
+    apply_routes,
+    apply_routes_config_db,
+    remove_routes_config_db,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +50,11 @@ def _count_routes(duthost):
 def _wait_for_routes(duthost, target, compare, label):
     """
     Poll 'show ip route' until compare(count, target) is True.
-    No timeout -- polls until convergence is reached.
+
+    This measures FIB convergence: time for the switch to program routes
+    from config DB into the kernel/ASIC so they appear in 'show ip route'.
+    For 40k routes this can take several minutes; it is separate from the
+    (fast) config DB write. No timeout -- polls until convergence.
 
     Returns (elapsed_seconds, final_count).
     """
@@ -55,17 +70,30 @@ def _wait_for_routes(duthost, target, compare, label):
 
 
 def test_add_40k_static_routes(duthost, nexthop_ip, loganalyzer,
-                               baseline_route_count, test_summary):
+                               baseline_route_count, test_summary, route_stress_method):
     """Add 40K static routes and verify how long until 'show ip route' reflects them."""
     logger.info("Baseline routes before add: %d", baseline_route_count)
-    logger.info("Adding %d static routes via 'ip route add' ...", NUM_ROUTES)
+    logger.info("Route method: %s", route_stress_method)
+
     start_time = time.time()
-    apply_routes(duthost, "add", NUM_ROUTES, nexthop_ip)
+    if route_stress_method == "config_db":
+        logger.info("Adding %d static routes via config load (STATIC_ROUTE) ...", NUM_ROUTES)
+        apply_routes_config_db(duthost, NUM_ROUTES, nexthop_ip)
+    else:
+        logger.info("Adding %d static routes via ip -batch ...", NUM_ROUTES)
+        apply_routes(duthost, "add", NUM_ROUTES, nexthop_ip)
     add_duration = time.time() - start_time
     logger.info("Route addition took %.2f seconds", add_duration)
 
     target = baseline_route_count + int(NUM_ROUTES * 0.99)
-    logger.info("Waiting for routes to appear in 'show ip route' (target >= %d) ...", target)
+    if route_stress_method == "config_db":
+        logger.info(
+            "Waiting for FIB convergence (routes to appear in 'show ip route'; target >= %d). "
+            "Switch programming 40k routes from config DB to FIB.",
+            target,
+        )
+    else:
+        logger.info("Waiting for routes to appear in 'show ip route' (target >= %d) ...", target)
     convergence_time, final_count = _wait_for_routes(
         duthost,
         target,
@@ -85,6 +113,7 @@ def test_add_40k_static_routes(duthost, nexthop_ip, loganalyzer,
         "show_duration": show_duration,
         "route_count": final_count,
         "baseline_route_count": baseline_route_count,
+        "route_method": route_stress_method,
     }
 
 
@@ -107,20 +136,33 @@ def test_verify_cpu_and_memory(duthost, loganalyzer, test_summary):
 
 
 def test_remove_40k_static_routes(duthost, nexthop_ip, loganalyzer,
-                                  baseline_route_count, test_summary):
+                                  baseline_route_count, test_summary, route_stress_method):
     """Remove 40K static routes and verify how long until 'show ip route' reflects removal."""
     logger.info("Baseline routes before test: %d", baseline_route_count)
-    logger.info("Removing %d static routes via 'ip route del' ...", NUM_ROUTES)
+    logger.info("Route method: %s", route_stress_method)
+
     start_time = time.time()
-    apply_routes(duthost, "del", NUM_ROUTES, nexthop_ip)
+    if route_stress_method == "config_db":
+        logger.info("Removing %d static routes from config DB ...", NUM_ROUTES)
+        remove_routes_config_db(duthost, NUM_ROUTES)
+    else:
+        logger.info("Removing %d static routes via ip -batch ...", NUM_ROUTES)
+        apply_routes(duthost, "del", NUM_ROUTES, nexthop_ip)
     del_duration = time.time() - start_time
     logger.info("Route removal took %.2f seconds", del_duration)
 
-    logger.info("Waiting for routes to return to baseline (<= %d) ...",
-                baseline_route_count)
+    # Converged when 99% of added routes are gone (allow up to 1% remaining)
+    del_target = baseline_route_count + int(NUM_ROUTES * 0.01)
+    if route_stress_method == "config_db":
+        logger.info(
+            "Waiting for FIB convergence (99%% removed: routes <= %d).",
+            del_target,
+        )
+    else:
+        logger.info("Waiting for 99%% of routes to disappear (target <= %d) ...", del_target)
     convergence_time, final_count = _wait_for_routes(
         duthost,
-        baseline_route_count,
+        del_target,
         lambda count, tgt: count <= tgt,
         "del-convergence",
     )
@@ -136,4 +178,5 @@ def test_remove_40k_static_routes(duthost, nexthop_ip, loganalyzer,
         "show_duration": show_duration,
         "remaining_routes": final_count,
         "baseline_route_count": baseline_route_count,
+        "route_method": route_stress_method,
     }
