@@ -1,0 +1,154 @@
+import pytest
+import logging
+
+from tests.community.route_helpers import (
+    NUM_ROUTES,
+    ROUTE_PREFIX,
+    apply_routes,
+    remove_routes_config_db,
+)
+
+logger = logging.getLogger(__name__)
+
+_summary_data = {}
+
+
+def pytest_addoption(parser):
+    """Add option for 40K route stress test method."""
+    parser.addoption(
+        "--route-stress-method",
+        action="store",
+        default="config_db",
+        choices=("config_db", "ip_batch"),
+        help="How to add/remove 40K static routes: 'config_db' (persistent, config load + redis DEL) "
+             "or 'ip_batch' (non-persistent, ip -batch). Default: config_db.",
+    )
+
+
+@pytest.fixture(scope="module")
+def nexthop_ip(duthost):
+    """Get a gateway address from the DUT's default route."""
+    output = duthost.shell("ip -4 route show default", module_ignore_errors=True)["stdout"]
+    for line in output.split('\n'):
+        if 'via' in line:
+            parts = line.split()
+            return parts[parts.index('via') + 1]
+    pytest.fail("No default gateway found on DUT")
+
+
+@pytest.fixture(scope="module")
+def baseline_route_count(duthost):
+    """Snapshot how many routes already match ROUTE_PREFIX before any test routes are added."""
+    result = duthost.shell(
+        "show ip route | grep -c '{}'".format(ROUTE_PREFIX),
+        module_ignore_errors=True
+    )
+    count = int(result["stdout"].strip() or "0")
+    logger.info("Baseline routes matching '%s': %d", ROUTE_PREFIX, count)
+    return count
+
+
+@pytest.fixture(scope="module")
+def test_summary():
+    """Module-scoped dict to accumulate test results for the final summary."""
+    return _summary_data
+
+
+@pytest.fixture(scope="module")
+def route_stress_method(request):
+    """'config_db' or 'ip_batch' from --route-stress-method."""
+    return request.config.getoption("--route-stress-method", "config_db")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def manage_routes_cleanup(duthost, request, nexthop_ip):
+    """Remove all test routes and temp files after the module finishes."""
+    yield
+    method = request.config.getoption("--route-stress-method", "config_db")
+    logger.info("Cleanup: removing test routes (method=%s)", method)
+    if method == "config_db":
+        remove_routes_config_db(duthost, NUM_ROUTES)
+        duthost.shell("rm -f /tmp/static_routes_40k.json /tmp/static_route_keys_40k.txt",
+                      module_ignore_errors=True)
+    else:
+        apply_routes(duthost, "del", NUM_ROUTES, nexthop_ip)
+        duthost.shell("rm -f /tmp/routes_*.txt", module_ignore_errors=True)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Print the 40K routes stress test summary at the very end of output."""
+    if not _summary_data:
+        return
+
+    write = terminalreporter.write_line
+    sep = "=" * 80
+
+    write("")
+    write(sep)
+    write("  40K STATIC ROUTES STRESS TEST SUMMARY")
+    write(sep)
+
+    add_info = _summary_data.get("add", {})
+    route_method = add_info.get("route_method", "config_db")
+    write("")
+    write("1. Configure 40K static routes and verify how much time it takes for them to be")
+    write("   shown in the CLI show commands. Method: {}.".format(route_method))
+    if add_info:
+        write("   - Pre-existing routes (baseline_route_count): {}".format(
+            add_info["baseline_route_count"]))
+        if route_method == "config_db":
+            write("   - Config load duration (write to config DB)   : {:.2f} seconds".format(
+                add_info["add_duration"]))
+            write("   - FIB convergence (routes appear in CLI)     : {:.2f} seconds".format(
+                add_info["convergence_time"]))
+        else:
+            write("   - Route addition (ip -batch) duration       : {:.2f} seconds".format(
+                add_info["add_duration"]))
+            write("   - Time for routes to appear in CLI          : {:.2f} seconds".format(
+                add_info["convergence_time"]))
+        write("   - 'show ip route' execution time            : {:.2f} seconds".format(
+            add_info["show_duration"]))
+        write("   - Routes found in 'show ip route'           : {} (baseline_route_count {} + added {})".format(
+            add_info["route_count"], add_info["baseline_route_count"],
+            add_info["route_count"] - add_info["baseline_route_count"]))
+    else:
+        write("   - SKIPPED (test_add_40k_static_routes did not run)")
+
+    cpu_mem = _summary_data.get("cpu_memory", {})
+    write("")
+    write("2. Verify memory and CPU (monitored using 'top'):")
+    if cpu_mem:
+        write("   --- top output ---")
+        for line in cpu_mem["top_output"].splitlines():
+            write("   {}".format(line))
+        write("   --- system-memory ---")
+        for line in cpu_mem["mem_output"].splitlines():
+            write("   {}".format(line))
+    else:
+        write("   - SKIPPED (test_verify_cpu_and_memory did not run)")
+
+    remove_info = _summary_data.get("remove", {})
+    remove_method = remove_info.get("route_method", "config_db") if remove_info else "config_db"
+    write("")
+    write("3. Remove 40K static routes and verify how much time it takes for them to be")
+    write("   not shown in the CLI show commands. Method: {}.".format(remove_method))
+    if remove_info:
+        if remove_method == "config_db":
+            write("   - Config DB removal duration                : {:.2f} seconds".format(
+                remove_info["del_duration"]))
+            write("   - FIB convergence (routes disappear from CLI): {:.2f} seconds".format(
+                remove_info["convergence_time"]))
+        else:
+            write("   - Route removal (ip -batch) duration   : {:.2f} seconds".format(
+                remove_info["del_duration"]))
+            write("   - Time for routes to disappear from CLI: {:.2f} seconds".format(
+                remove_info["convergence_time"]))
+        write("   - 'show ip route' execution time       : {:.2f} seconds".format(
+            remove_info["show_duration"]))
+        write("   - Routes remaining in 'show ip route'  : {} (baseline_route_count was {})".format(
+            remove_info["remaining_routes"], remove_info["baseline_route_count"]))
+    else:
+        write("   - SKIPPED (test_remove_40k_static_routes did not run)")
+
+    write("")
+    write(sep)
